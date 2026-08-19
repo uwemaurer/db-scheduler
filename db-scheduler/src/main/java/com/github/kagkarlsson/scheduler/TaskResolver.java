@@ -35,14 +35,78 @@ public class TaskResolver {
   private static final Logger LOG = LoggerFactory.getLogger(TaskResolver.class);
   private final SchedulerListeners schedulerListeners;
   private final Clock clock;
+  private final String namespace;
   private final Map<String, Task> taskMap;
   private final Map<String, UnresolvedTask> unresolvedTasks = new ConcurrentHashMap<>();
 
   public TaskResolver(
       SchedulerListeners schedulerListeners, Clock clock, List<Task<?>> knownTasks) {
+    this(schedulerListeners, clock, "", knownTasks);
+  }
+
+  /**
+   * @param namespace task-name prefix this scheduler owns, or empty for the whole table
+   */
+  public TaskResolver(
+      SchedulerListeners schedulerListeners,
+      Clock clock,
+      String namespace,
+      List<Task<?>> knownTasks) {
+    validateNamespace(namespace, knownTasks);
     this.schedulerListeners = schedulerListeners;
     this.clock = clock;
+    this.namespace = namespace;
     this.taskMap = knownTasks.stream().collect(Collectors.toMap(Task::getName, identity()));
+  }
+
+  /**
+   * Rejects a namespace that cannot be used as a SQL {@code like}-prefix, and task-names that fall
+   * outside it. A task named outside its scheduler's namespace would silently never execute.
+   */
+  private static void validateNamespace(String namespace, List<Task<?>> knownTasks) {
+    if (namespace.isEmpty()) {
+      return;
+    }
+    if (namespace.contains("%") || namespace.contains("_") || namespace.contains("\\")) {
+      throw new IllegalArgumentException(
+          "Task-namespace '"
+              + namespace
+              + "' must not contain the SQL like-wildcards '%', '_' or the escape-character '\\'.");
+    }
+    if (Character.isLetterOrDigit(namespace.charAt(namespace.length() - 1))) {
+      // Without a separator, namespace 'reports' would also own 'reportsarchive/...' and delete
+      // those executions once they had been unresolved for deleteUnresolvedAfter.
+      throw new IllegalArgumentException(
+          "Task-namespace '"
+              + namespace
+              + "' must end with a separator character, e.g. '"
+              + namespace
+              + "/', so that it cannot also match task-names of a namespace it merely prefixes.");
+    }
+    List<String> outside =
+        knownTasks.stream()
+            .map(Task::getName)
+            .filter(name -> !name.startsWith(namespace))
+            .collect(Collectors.toList());
+    if (!outside.isEmpty()) {
+      throw new IllegalArgumentException(
+          "Scheduler has task-namespace '"
+              + namespace
+              + "', but these tasks are named outside it and would never execute: "
+              + outside
+              + ". Either rename them to start with the namespace, or remove the namespace.");
+    }
+  }
+
+  /**
+   * The task-name prefix this scheduler owns, or empty for the whole table.
+   *
+   * <p>Because every query is restricted to the namespace, an unresolvable task-name can only ever
+   * be one inside it. That is what makes deletion of unresolved executions safe when several
+   * schedulers share a table.
+   */
+  public String getNamespace() {
+    return namespace;
   }
 
   public Optional<Task> resolve(Resolvable resolvable) {
@@ -54,7 +118,7 @@ public class TaskResolver {
 
     Task task = taskMap.get(taskName);
     if (task == null && addUnresolvedToExclusionFilter) {
-      addUnresolved(taskName, resolvable.getExecutionTime());
+      addUnresolved(taskName);
       schedulerListeners.onSchedulerEvent(SchedulerEventType.UNRESOLVED_TASK);
       LOG.info(
           "Found execution with unknown task-name '{}'. Adding it to the list of known unresolved task-names.",
@@ -63,12 +127,15 @@ public class TaskResolver {
     return Optional.ofNullable(task);
   }
 
-  private void addUnresolved(String taskName, Instant executionTime) {
-    unresolvedTasks.putIfAbsent(taskName, new UnresolvedTask(taskName, executionTime));
+  private void addUnresolved(String taskName) {
+    // Retention is counted from when the task-name was first seen to be unresolvable, not from the
+    // execution-time, which for a due execution always lies in the past.
+    unresolvedTasks.putIfAbsent(taskName, new UnresolvedTask(taskName, clock.now()));
   }
 
   public void addTask(Task task) {
     taskMap.put(task.getName(), task);
+    clearUnresolved(task.getName());
   }
 
   public List<UnresolvedTask> getUnresolved() {
@@ -98,9 +165,9 @@ public class TaskResolver {
     private final String taskName;
     private final Instant firstUnresolved;
 
-    public UnresolvedTask(String taskName, Instant executionTime) {
+    public UnresolvedTask(String taskName, Instant firstUnresolved) {
       this.taskName = taskName;
-      firstUnresolved = executionTime;
+      this.firstUnresolved = firstUnresolved;
     }
 
     public String getTaskName() {

@@ -66,8 +66,9 @@ public class PostgreSqlJdbcCustomization extends DefaultJdbcCustomization {
   @Override
   public List<Execution> lockAndFetchSingleStatement(
       JdbcTaskRepositoryContext ctx, Instant now, int limit, boolean orderByPriority) {
-    final JdbcTaskRepository.UnresolvedFilter unresolvedFilter =
-        new JdbcTaskRepository.UnresolvedFilter(ctx.taskResolver.getUnresolved());
+    final JdbcTaskRepository.TaskNameFilter taskNameFilter =
+        new JdbcTaskRepository.TaskNameFilter(
+            ctx.taskResolver.getNamespace(), ctx.taskResolver.getUnresolved());
 
     String selectForUpdateQuery =
         " WITH locked_executions as (UPDATE "
@@ -78,7 +79,7 @@ public class PostgreSqlJdbcCustomization extends DefaultJdbcCustomization {
             + ctx.tableName
             + " st2 "
             + " WHERE picked = ? and execution_time <= ? "
-            + unresolvedFilter.andCondition()
+            + taskNameFilter.andCondition()
             + Queries.ansiSqlOrderPart(orderByPriority)
             + " FOR UPDATE SKIP LOCKED "
             + getQueryLimitPart(limit)
@@ -98,7 +99,7 @@ public class PostgreSqlJdbcCustomization extends DefaultJdbcCustomization {
           // Inner select
           ps.setBoolean(index++, false); // picked (old)
           setInstant(ps, index++, now); // execution_time
-          index = unresolvedFilter.setParameters(ps, index);
+          index = taskNameFilter.setParameters(ps, index);
         },
         ctx.resultSetMapper.get());
   }

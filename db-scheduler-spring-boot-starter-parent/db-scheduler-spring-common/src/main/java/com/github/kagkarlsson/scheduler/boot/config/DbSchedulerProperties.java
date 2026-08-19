@@ -102,6 +102,13 @@ public class DbSchedulerProperties {
       SchedulerBuilder.DEFAULT_DELETION_OF_UNRESOLVED_TASKS_DURATION;
 
   /**
+   * Restricts this scheduler to task-names starting with this prefix, e.g. <code>emails/</code>.
+   * Use when several independent schedulers share a table, each owning its own namespace. Empty
+   * (the default) means the whole table.
+   */
+  private String taskNamespace = "";
+
+  /**
    * How long the scheduler will wait before interrupting executor-service threads. If you find
    * yourself using this, consider if it is possible to instead regularly check <code>
    * executionContext.getSchedulerState().isShuttingDown()</code> in the ExecutionHandler and abort
@@ -194,6 +201,14 @@ public class DbSchedulerProperties {
 
   public void setDelayStartupUntilContextReady(final boolean delayStartupUntilContextReady) {
     this.delayStartupUntilContextReady = delayStartupUntilContextReady;
+  }
+
+  public String getTaskNamespace() {
+    return taskNamespace;
+  }
+
+  public void setTaskNamespace(String taskNamespace) {
+    this.taskNamespace = taskNamespace;
   }
 
   public Duration getDeleteUnresolvedAfter() {

@@ -17,7 +17,6 @@ import static com.github.kagkarlsson.scheduler.StringUtils.truncate;
 import static java.util.Optional.ofNullable;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.partitioningBy;
-import static java.util.stream.Collectors.toList;
 
 import com.github.kagkarlsson.jdbc.JdbcRunner;
 import com.github.kagkarlsson.jdbc.ResultSetMapper;
@@ -305,11 +304,12 @@ public class JdbcTaskRepository implements TaskRepository {
   @Override
   public void getScheduledExecutions(
       ScheduledExecutionsFilter filter, Consumer<Execution> consumer) {
-    UnresolvedFilter unresolvedFilter = new UnresolvedFilter(taskResolver.getUnresolved());
+    TaskNameFilter taskNameFilter =
+        new TaskNameFilter(taskResolver.getNamespace(), taskResolver.getUnresolved());
 
     QueryBuilder q = queryForFilter(filter);
-    if (unresolvedFilter.isActive() && !filter.getIncludeUnresolved()) {
-      q.andCondition(unresolvedFilter);
+    if (taskNameFilter.isActive() && !filter.getIncludeUnresolved()) {
+      q.andCondition(taskNameFilter);
     }
 
     jdbcRunner.query(
@@ -321,11 +321,12 @@ public class JdbcTaskRepository implements TaskRepository {
   @Override
   public void getScheduledExecutions(
       ScheduledExecutionsFilter filter, String taskName, Consumer<Execution> consumer) {
-    UnresolvedFilter unresolvedFilter = new UnresolvedFilter(taskResolver.getUnresolved());
+    TaskNameFilter taskNameFilter =
+        new TaskNameFilter(taskResolver.getNamespace(), taskResolver.getUnresolved());
 
     QueryBuilder q = queryForFilter(filter);
-    if (unresolvedFilter.isActive() && !filter.getIncludeUnresolved()) {
-      q.andCondition(unresolvedFilter);
+    if (taskNameFilter.isActive() && !filter.getIncludeUnresolved()) {
+      q.andCondition(taskNameFilter);
     }
     q.andCondition(new TaskCondition(taskName));
 
@@ -364,12 +365,13 @@ public class JdbcTaskRepository implements TaskRepository {
   @Override
   public List<Execution> getDue(Instant now, int limit) {
     LOG.trace("Using generic fetch-then-lock query");
-    final UnresolvedFilter unresolvedFilter = new UnresolvedFilter(taskResolver.getUnresolved());
+    final TaskNameFilter taskNameFilter =
+        new TaskNameFilter(taskResolver.getNamespace(), taskResolver.getUnresolved());
     String selectDueQuery =
         jdbcCustomization.createSelectDueQuery(
-            tableName, limit, unresolvedFilter.andCondition(), orderByPriority);
+            tableName, limit, taskNameFilter.andCondition(), orderByPriority);
 
-    return getExecutions(jdbcRunner, selectDueQuery, now, limit, unresolvedFilter);
+    return getExecutions(jdbcRunner, selectDueQuery, now, limit, taskNameFilter);
   }
 
   private List<Execution> lockAndFetchSingleStatement(Instant now, int limit) {
@@ -394,13 +396,13 @@ public class JdbcTaskRepository implements TaskRepository {
   public List<Execution> lockAndFetchGeneric(Instant now, int limit) {
     return jdbcRunner.inTransaction(
         txRunner -> {
-          final UnresolvedFilter unresolvedFilter =
-              new UnresolvedFilter(taskResolver.getUnresolved());
+          final TaskNameFilter taskNameFilter =
+              new TaskNameFilter(taskResolver.getNamespace(), taskResolver.getUnresolved());
           String selectForUpdateQuery =
               jdbcCustomization.createGenericSelectForUpdateQuery(
-                  tableName, limit, unresolvedFilter.andCondition(), orderByPriority);
+                  tableName, limit, taskNameFilter.andCondition(), orderByPriority);
           List<Execution> candidates =
-              getExecutions(txRunner, selectForUpdateQuery, now, limit, unresolvedFilter);
+              getExecutions(txRunner, selectForUpdateQuery, now, limit, taskNameFilter);
 
           if (candidates.isEmpty()) {
             return new ArrayList<>();
@@ -460,18 +462,14 @@ public class JdbcTaskRepository implements TaskRepository {
   }
 
   private List<Execution> getExecutions(
-      JdbcRunner jdbcRunner,
-      String query,
-      Instant now,
-      int limit,
-      UnresolvedFilter unresolvedFilter) {
+      JdbcRunner jdbcRunner, String query, Instant now, int limit, TaskNameFilter taskNameFilter) {
     return jdbcRunner.query(
         query,
         (PreparedStatement p) -> {
           int index = 1;
           p.setBoolean(index++, false);
           jdbcCustomization.setInstant(p, index++, now);
-          unresolvedFilter.setParameters(p, index);
+          taskNameFilter.setParameters(p, index);
           if (!jdbcCustomization.supportsExplicitQueryLimitPart()) {
             p.setMaxRows(limit);
           }
@@ -672,18 +670,19 @@ public class JdbcTaskRepository implements TaskRepository {
 
   @Override
   public List<Execution> getDeadExecutions(Instant olderThan) {
-    final UnresolvedFilter unresolvedFilter = new UnresolvedFilter(taskResolver.getUnresolved());
+    final TaskNameFilter taskNameFilter =
+        new TaskNameFilter(taskResolver.getNamespace(), taskResolver.getUnresolved());
     return jdbcRunner.query(
         "select * from "
             + tableName
             + " where picked = ? and last_heartbeat <= ? "
-            + unresolvedFilter.andCondition()
+            + taskNameFilter.andCondition()
             + " order by last_heartbeat asc",
         (PreparedStatement p) -> {
           int index = 1;
           p.setBoolean(index++, true);
           jdbcCustomization.setInstant(p, index++, olderThan);
-          unresolvedFilter.setParameters(p, index);
+          taskNameFilter.setParameters(p, index);
         },
         new ExecutionResultSetMapper(false, true));
   }
@@ -746,18 +745,19 @@ public class JdbcTaskRepository implements TaskRepository {
 
   @Override
   public List<Execution> getExecutionsFailingLongerThan(Duration interval) {
-    UnresolvedFilter unresolvedFilter = new UnresolvedFilter(taskResolver.getUnresolved());
+    TaskNameFilter taskNameFilter =
+        new TaskNameFilter(taskResolver.getNamespace(), taskResolver.getUnresolved());
     return jdbcRunner.query(
         "select * from "
             + tableName
             + " where "
             + "    consecutive_failures > 0 "
             + "    and (last_success is null or last_success < ?) "
-            + unresolvedFilter.andCondition(),
+            + taskNameFilter.andCondition(),
         (PreparedStatement p) -> {
           int index = 1;
           jdbcCustomization.setInstant(p, index++, clock.now().minus(interval));
-          unresolvedFilter.setParameters(p, index);
+          taskNameFilter.setParameters(p, index);
         },
         new ExecutionResultSetMapper(false, false));
   }
@@ -977,33 +977,48 @@ public class JdbcTaskRepository implements TaskRepository {
     };
   }
 
-  static class UnresolvedFilter implements AndCondition {
+  /**
+   * Restricts a query to the executions a scheduler-instance is responsible for: its
+   * task-namespace, minus the unresolvable task-names inside it.
+   */
+  public static class TaskNameFilter implements AndCondition {
 
+    private final String namespace;
     private final List<UnresolvedTask> unresolved;
 
-    public UnresolvedFilter(List<UnresolvedTask> unresolved) {
+    public TaskNameFilter(String namespace, List<UnresolvedTask> unresolved) {
+      this.namespace = namespace;
       this.unresolved = unresolved;
     }
 
     public boolean isActive() {
-      return !unresolved.isEmpty();
+      return !namespace.isEmpty() || !unresolved.isEmpty();
     }
 
     public String andCondition() {
-      return unresolved.isEmpty() ? "" : "and " + getQueryPart();
+      return isActive() ? "and " + getQueryPart() : "";
     }
 
     public String getQueryPart() {
-      return "task_name not in ("
-          + unresolved.stream().map(ignored -> "?").collect(joining(","))
-          + ")";
+      List<String> parts = new ArrayList<>();
+      if (!namespace.isEmpty()) {
+        parts.add("task_name like ?");
+      }
+      if (!unresolved.isEmpty()) {
+        parts.add(
+            "task_name not in ("
+                + unresolved.stream().map(ignored -> "?").collect(joining(","))
+                + ")");
+      }
+      return String.join(" and ", parts);
     }
 
     public int setParameters(PreparedStatement p, int index) throws SQLException {
-      final List<String> unresolvedTasknames =
-          unresolved.stream().map(UnresolvedTask::getTaskName).collect(toList());
-      for (String taskName : unresolvedTasknames) {
-        p.setString(index++, taskName);
+      if (!namespace.isEmpty()) {
+        p.setString(index++, namespace + "%");
+      }
+      for (UnresolvedTask task : unresolved) {
+        p.setString(index++, task.getTaskName());
       }
       return index;
     }

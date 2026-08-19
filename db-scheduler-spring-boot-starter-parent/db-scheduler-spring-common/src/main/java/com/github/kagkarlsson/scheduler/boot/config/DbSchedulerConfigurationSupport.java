@@ -121,6 +121,7 @@ public final class DbSchedulerConfigurationSupport {
     customizer.housekeeperExecutor().ifPresent(builder::housekeeperExecutor);
 
     builder.deleteUnresolvedAfter(config.getDeleteUnresolvedAfter());
+    builder.taskNamespace(config.getTaskNamespace());
     builder.startTasks(startupTasks(configuredTasks));
     builder.addSchedulerListener(new StatsRegistryAdapter(registry));
     builder.failureLogging(config.getFailureLoggerLevel(), config.isFailureLoggerLogStackTrace());

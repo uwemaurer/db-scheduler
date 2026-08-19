@@ -69,6 +69,7 @@ public class SchedulerBuilder {
   protected ExecutorService dueExecutor;
   protected ScheduledExecutorService housekeeperExecutor;
   protected Duration deleteUnresolvedAfter = DEFAULT_DELETION_OF_UNRESOLVED_TASKS_DURATION;
+  protected String taskNamespace = "";
   protected JdbcCustomization jdbcCustomization = null;
   protected Duration shutdownMaxWait = SHUTDOWN_MAX_WAIT;
   protected boolean commitWhenAutocommitDisabled = false;
@@ -173,8 +174,27 @@ public class SchedulerBuilder {
     return this;
   }
 
+  /**
+   * Time after which executions with unresolved task-names are deleted. Counted from when the
+   * task-name was first seen to be unresolvable. With {@link #taskNamespace(String)} set, only
+   * task-names inside the namespace can ever be deemed unresolved, so the deletion cannot reach
+   * another scheduler's executions.
+   */
   public SchedulerBuilder deleteUnresolvedAfter(Duration deleteAfter) {
     this.deleteUnresolvedAfter = deleteAfter;
+    return this;
+  }
+
+  /**
+   * Restricts this scheduler-instance to task-names starting with the given prefix, e.g. <code>
+   * "emails/"</code>. Use when several independent schedulers share a table, each owning its own
+   * namespace. All tasks registered with this scheduler must be named inside the namespace, and
+   * executions outside it are never read, executed or deleted.
+   *
+   * <p>Defaults to the empty namespace, which is the whole table.
+   */
+  public SchedulerBuilder taskNamespace(String namespace) {
+    this.taskNamespace = namespace;
     return this;
   }
 
@@ -257,7 +277,8 @@ public class SchedulerBuilder {
     }
 
     final TaskResolver taskResolver =
-        new TaskResolver(new SchedulerListeners(schedulerListeners), clock, knownTasks);
+        new TaskResolver(
+            new SchedulerListeners(schedulerListeners), clock, taskNamespace, knownTasks);
     final JdbcCustomization jdbcCustomization =
         ofNullable(this.jdbcCustomization)
             .orElseGet(
@@ -313,14 +334,15 @@ public class SchedulerBuilder {
     Waiter waiter = buildWaiter();
 
     LOG.info(
-        "Creating scheduler with configuration: threads={}, pollInterval={}s, heartbeat={}s, enable-immediate-execution={}, enable-priority={}, table-name={}, name={}",
+        "Creating scheduler with configuration: threads={}, pollInterval={}s, heartbeat={}s, enable-immediate-execution={}, enable-priority={}, table-name={}, name={}, task-namespace={}",
         executorThreads,
         waiter.getWaitDuration().getSeconds(),
         heartbeatInterval.getSeconds(),
         enableImmediateExecution,
         enablePriority,
         tableName,
-        schedulerName.getName());
+        schedulerName.getName(),
+        taskNamespace.isEmpty() ? "<all>" : taskNamespace);
 
     final Scheduler scheduler =
         new Scheduler(

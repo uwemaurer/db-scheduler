@@ -341,8 +341,14 @@ will use should still be supplied (for scheduler polling optimizations). Default
 
 :gear: `.deleteUnresolvedAfter(Duration)`<br/>
 The time after which executions with unresolved tasks are automatically deleted. These can typically be old recurring
-tasks that are not in use anymore. This is non-zero to prevent accidental removal of tasks through a configuration
-error (missing known-tasks) and problems during rolling upgrades. Default `14d`.
+tasks that are not in use anymore. Counted from when the task-name was first seen to be unresolvable. This is non-zero
+to prevent accidental removal of tasks through a configuration error (missing known-tasks) and problems during rolling
+upgrades. Default `14d`.
+
+:gear: `.taskNamespace(String)`<br/>
+Restricts this scheduler-instance to task-names starting with the given prefix, e.g. `"emails/"`. Use when several
+independent schedulers share a table, each owning its own namespace. See
+[Separate schedulers sharing a table](#separate-schedulers-sharing-a-table). Default `""`, meaning the whole table.
 
 :gear: `.jdbcCustomization(JdbcCustomization)`<br/>
 db-scheduler tries to auto-detect the database used to see if any jdbc-interactions need to be customized. This
@@ -568,7 +574,33 @@ Behavior of unresolved tasks:
 
 * They are excluded from polling — the current instance will not attempt to pick or execute them.
 * They remain in the database so other instances (e.g., newer versions in a rolling update or canary deployment) can pick and process them.
-* They are **automatically removed** after a configured retention period `deleteUnresolvedAfter`, if they remain unresolved.
+* They are **automatically removed** after a configured retention period `deleteUnresolvedAfter`, if they remain unresolved. The retention period is counted from when the task-name was first seen to be unresolvable.
+
+### Separate schedulers sharing a table
+
+Several independent schedulers may share one table, each owning a distinct set of tasks. The default behavior above is a
+poor fit for this: a scheduler cannot tell a task owned by a live peer from an obsolete one, so it will eventually
+delete the peer's executions once `deleteUnresolvedAfter` has passed.
+
+Give each scheduler a task-namespace instead, and name its tasks inside it:
+
+```java
+Scheduler.create(dataSource, Tasks.oneTime("emails/welcome").execute(..))
+    .taskNamespace("emails/")
+    .build();
+```
+
+Every query is then restricted to `task_name like 'emails/%'`, so the scheduler never picks, executes or deletes
+executions from another namespace. And since it only ever sees its own executions, an unresolved task-name can only be
+one inside its namespace, where it genuinely is obsolete — so `deleteUnresolvedAfter` keeps working, correctly scoped.
+
+* All tasks must be named inside the namespace, or the scheduler refuses to start.
+* The namespace must end with a separator (`emails/`, not `emails`), so that it cannot also match the
+  task-names of a namespace it merely prefixes. The scheduler refuses to start otherwise.
+* A `SchedulerClient` in another process must schedule using the full task-name, namespace included.
+* Adopting a namespace in an existing deployment means renaming tasks. Executions already in the table keep their old
+  names, so migrate them:
+  `update scheduled_tasks set task_name = 'emails/' || task_name where ...`
 
 ## Things to note / gotchas
 

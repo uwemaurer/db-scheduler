@@ -83,6 +83,11 @@ public class TestHelper {
       return this;
     }
 
+    public ManualSchedulerBuilder taskNamespace(String namespace) {
+      super.taskNamespace = namespace;
+      return this;
+    }
+
     public ManualSchedulerBuilder tableName(String tableName) {
       super.tableName = tableName;
       return this;
@@ -95,7 +100,8 @@ public class TestHelper {
 
     public ManualScheduler build() {
       final TaskResolver taskResolver =
-          new TaskResolver(new SchedulerListeners(schedulerListeners), clock, knownTasks);
+          new TaskResolver(
+              new SchedulerListeners(schedulerListeners), clock, taskNamespace, knownTasks);
       final JdbcCustomization jdbcCustomization =
           ofNullable(this.jdbcCustomization)
               .orElseGet(
