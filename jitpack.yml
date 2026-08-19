@@ -1,0 +1,9 @@
+# Fork-only build config for JitPack. Not part of the upstream PR.
+jdk:
+  - openjdk17
+
+install:
+  # Use the wrapper so the build gets Maven 3.9.x. The project's enforcer
+  # requires >= 3.8.0, which JitPack's bundled Maven does not always satisfy.
+  # Tests are skipped: the compatibility tests need Docker, which JitPack has no.
+  - ./mvnw -B install -DskipTests -Dmaven.javadoc.skip=true
